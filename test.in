@@ -1,0 +1,12 @@
+12
+Declare int a 3
+Print a
+Indent
+Declare int a 4
+Print a
+Dedent
+Print a
+Indent
+Declare string s "hi"
+SelfAdd s "!"
+Print s

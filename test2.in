@@ -1,0 +1,16 @@
+14
+Declare int x 1
+Declare int y 2
+Declare int z 0
+Add z x y
+Print z
+SelfAdd z 5
+Print z
+Indent
+Declare string s "a"
+Declare string t "b"
+Declare string u ""
+Add u s t
+Print u
+Dedent
+Print u
