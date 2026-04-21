@@ -18,28 +18,56 @@ static inline bool is_valid_varname(const string &s) {
 }
 
 struct ScopeSimulator {
-    vector<unordered_map<string, Var>> scopes;
+    // depth starts from 0
+    int depth = 0;
+    unordered_map<string, vector<pair<int, Var>>> table;
+    vector<vector<string>> declared; // names declared per depth
 
-    ScopeSimulator() { scopes.emplace_back(); }
+    ScopeSimulator() {
+        declared.emplace_back();
+        table.reserve(131072);
+    }
 
-    int find_scope_idx(const string &name) const {
-        for (int i = (int)scopes.size() - 1; i >= 0; --i) {
-            auto it = scopes[i].find(name);
-            if (it != scopes[i].end()) return i;
+    void indent() {
+        ++depth;
+        if ((int)declared.size() <= depth) declared.emplace_back();
+        else declared[depth].clear();
+    }
+
+    bool dedent() {
+        if (depth == 0) return false;
+        for (const string &name : declared[depth]) {
+            auto it = table.find(name);
+            if (it != table.end() && !it->second.empty() && it->second.back().first == depth) {
+                it->second.pop_back();
+                if (it->second.empty()) table.erase(it);
+            }
         }
-        return -1;
+        declared[depth].clear();
+        --depth;
+        return true;
+    }
+
+    const Var* get_top(const string &name) const {
+        auto it = table.find(name);
+        if (it == table.end() || it->second.empty()) return nullptr;
+        return &it->second.back().second;
+    }
+
+    Var* get_top(const string &name) {
+        auto it = table.find(name);
+        if (it == table.end() || it->second.empty()) return nullptr;
+        return &it->second.back().second;
     }
 
     bool declare_var(const string &type_token, const string &name, const string &value_part) {
         if (!is_valid_varname(name)) return false;
-        auto &cur = scopes.back();
-        if (cur.find(name) != cur.end()) return false; // redeclare in same scope invalid
+        auto &stack = table[name];
+        if (!stack.empty() && stack.back().first == depth) return false; // redeclare in same scope
 
         Var v;
         if (type_token == "int") {
-            // value_part should be an integer literal
             if (value_part.empty()) return false;
-            // validate integer literal
             int sign = 1; size_t i = 0;
             if (value_part[0] == '+' || value_part[0] == '-') {
                 if (value_part.size() == 1) return false;
@@ -48,55 +76,49 @@ struct ScopeSimulator {
             }
             long long acc = 0;
             for (; i < value_part.size(); ++i) {
-                char c = value_part[i];
-                if (!isdigit((unsigned char)c)) return false;
+                unsigned char c = value_part[i];
+                if (!isdigit(c)) return false;
                 acc = acc * 10 + (c - '0');
             }
             long long llv = acc * sign;
             if (llv < INT_MIN || llv > INT_MAX) return false;
             v.type = Var::INT;
             v.int_val = (int)llv;
-            cur[name] = std::move(v);
-            return true;
         } else if (type_token == "string") {
-            // value_part should be a quoted string "..."
             if (value_part.size() < 2) return false;
             if (value_part.front() != '"' || value_part.back() != '"') return false;
             v.type = Var::STRING;
             v.str_val = value_part.substr(1, value_part.size() - 2);
-            cur[name] = std::move(v);
-            return true;
         } else {
             return false;
         }
+        stack.emplace_back(depth, std::move(v));
+        declared[depth].push_back(name);
+        return true;
     }
 
     bool add_to_result(const string &res, const string &v1, const string &v2) {
         if (!is_valid_varname(res) || !is_valid_varname(v1) || !is_valid_varname(v2)) return false;
-        int ir = find_scope_idx(res);
-        int i1 = find_scope_idx(v1);
-        int i2 = find_scope_idx(v2);
-        if (ir < 0 || i1 < 0 || i2 < 0) return false;
-        Var &R = scopes[ir][res];
-        Var &A = scopes[i1][v1];
-        Var &B = scopes[i2][v2];
-        if (R.type != A.type || R.type != B.type) return false;
-        if (R.type == Var::INT) {
-            long long tmp = (long long)A.int_val + (long long)B.int_val;
-            if (tmp < INT_MIN || tmp > INT_MAX) return false; // though guaranteed
-            R.int_val = (int)tmp;
+        Var *R = get_top(res);
+        const Var *A = get_top(v1);
+        const Var *B = get_top(v2);
+        if (!R || !A || !B) return false;
+        if (R->type != A->type || R->type != B->type) return false;
+        if (R->type == Var::INT) {
+            long long tmp = (long long)A->int_val + (long long)B->int_val;
+            if (tmp < INT_MIN || tmp > INT_MAX) return false;
+            R->int_val = (int)tmp;
         } else {
-            R.str_val = A.str_val + B.str_val;
+            R->str_val = A->str_val + B->str_val;
         }
         return true;
     }
 
     bool self_add(const string &name, const string &value_repr, bool is_string_literal) {
         if (!is_valid_varname(name)) return false;
-        int idx = find_scope_idx(name);
-        if (idx < 0) return false;
-        Var &V = scopes[idx][name];
-        if (V.type == Var::INT) {
+        Var *V = get_top(name);
+        if (!V) return false;
+        if (V->type == Var::INT) {
             if (is_string_literal) return false;
             if (value_repr.empty()) return false;
             int sign = 1; size_t i = 0; long long acc = 0;
@@ -106,34 +128,21 @@ struct ScopeSimulator {
                 i = 1;
             }
             for (; i < value_repr.size(); ++i) {
-                char c = value_repr[i];
-                if (!isdigit((unsigned char)c)) return false;
+                unsigned char c = value_repr[i];
+                if (!isdigit(c)) return false;
                 acc = acc * 10 + (c - '0');
             }
-            long long llv = (long long)V.int_val + acc * sign;
+            long long llv = (long long)V->int_val + acc * sign;
             if (llv < INT_MIN || llv > INT_MAX) return false;
-            V.int_val = (int)llv;
+            V->int_val = (int)llv;
             return true;
-        } else { // STRING
+        } else {
             if (!is_string_literal) return false;
             if (value_repr.size() < 2) return false;
             if (value_repr.front() != '"' || value_repr.back() != '"') return false;
-            string add = value_repr.substr(1, value_repr.size() - 2);
-            V.str_val += add;
+            V->str_val += value_repr.substr(1, value_repr.size() - 2);
             return true;
         }
-    }
-
-    bool print_var(const string &name) const {
-        if (!is_valid_varname(name)) return false;
-        int idx = find_scope_idx(name);
-        if (idx < 0) return false;
-        const Var &V = scopes[idx].at(name);
-        cout << name << ":";
-        if (V.type == Var::INT) cout << V.int_val;
-        else cout << V.str_val;
-        cout << '\n';
-        return true;
     }
 };
 
@@ -167,6 +176,8 @@ int main() {
 
     string line;
     line.reserve(256);
+    string out;
+    out.reserve(1 << 20);
     for (long long _i = 0; _i < n; ++_i) {
         if (!std::getline(cin, line)) break;
         // Trim right for safety
@@ -174,15 +185,15 @@ int main() {
         size_t pos = 0; string cmd;
         // Fetch command token
         if (!next_token(line, pos, cmd)) {
-            cout << "Invalid operation\n";
+            out += "Invalid operation\n";
             continue;
         }
         bool ok = false;
         if (cmd == "Indent") {
-            sim.scopes.emplace_back();
+            sim.indent();
             ok = true;
         } else if (cmd == "Dedent") {
-            if (sim.scopes.size() <= 1) ok = false; else { sim.scopes.pop_back(); ok = true; }
+            ok = sim.dedent();
         } else if (cmd == "Declare") {
             string type_tok, var_name;
             if (!next_token(line, pos, type_tok) || !next_token(line, pos, var_name)) {
@@ -242,14 +253,26 @@ int main() {
         } else if (cmd == "Print") {
             string name;
             if (!next_token(line, pos, name)) ok = false;
-            else ok = sim.print_var(name);
+            else {
+                const Var *V = sim.get_top(name);
+                if (!V) ok = false;
+                else {
+                    out.append(name);
+                    out.push_back(':');
+                    if (V->type == Var::INT) out.append(to_string(V->int_val));
+                    else out.append(V->str_val);
+                    out.push_back('\n');
+                    ok = true;
+                }
+            }
         } else {
             ok = false;
         }
 
         if (!ok) {
-            cout << "Invalid operation\n";
+            out += "Invalid operation\n";
         }
     }
+    cout << out;
     return 0;
 }
